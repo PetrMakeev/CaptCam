@@ -1,0 +1,1 @@
+pyinstaller --name CaptCamw --onefile --windowed --add-binary "chromedriver.exe;." --add-data "resource/eye.ico;resource" --icon="resource/eye.ico" --clean main_ui.py
