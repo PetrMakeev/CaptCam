@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QLabel, QPushButton, QProgressBar, QTextEdit,
     QFrame, QStackedWidget, QMessageBox, QStyleFactory,
-    QCheckBox, QSizePolicy, QSpacerItem
+    QCheckBox
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QIcon, QFont, QPalette, QColor
@@ -34,7 +34,7 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 # ----------------------------------------------------------------------
-# Логи (безопасная ротация по суткам)
+# Логи
 # ----------------------------------------------------------------------
 import urllib3
 from selenium.webdriver.remote.remote_connection import LOGGER as SELENIUM_LOGGER
@@ -74,7 +74,6 @@ def replace_log_handler():
     root.addHandler(create_new_handler())
     root.setLevel(logging.INFO)
 
-# Инициализация
 replace_log_handler()
 logging.info("=== GUI ПРИЛОЖЕНИЕ ЗАПУЩЕНО ===")
 
@@ -83,13 +82,12 @@ def rotate_log_if_needed():
     if not os.path.exists(current_log):
         return
 
-    # Используем дату ПРОШЛЫХ суток
     yesterday = datetime.now() - timedelta(days=1)
     yesterday_str = yesterday.strftime("%Y%m%d")
     dated_log = get_dated_log_path(yesterday_str)
 
     if os.path.exists(dated_log):
-        return  # уже ротирован
+        return
 
     try:
         root = logging.getLogger()
@@ -99,9 +97,7 @@ def rotate_log_if_needed():
 
         os.rename(current_log, dated_log)
         logging.info(f"Лог переименован: {current_log} → {dated_log}")
-
         replace_log_handler()
-
     except Exception as e:
         try:
             replace_log_handler()
@@ -109,7 +105,6 @@ def rotate_log_if_needed():
             pass
         logging.warning(f"Не удалось ротировать лог: {e}")
 
-    # Удаляем старые логи (>5 дней)
     cutoff = datetime.now() - timedelta(days=MAX_LOG_DAYS)
     for file in Path(LOG_DIR).glob(f"{LOG_BASE}_*{LOG_EXT}"):
         try:
@@ -122,7 +117,7 @@ def rotate_log_if_needed():
             logging.warning(f"Ошибка при удалении старого лога {file.name}: {e}")
 
 # ----------------------------------------------------------------------
-# Блокировка дублирующего запуска (Windows)
+# Блокировка дублирующего запуска
 # ----------------------------------------------------------------------
 if sys.platform.startswith('win'):
     import win32event
@@ -382,7 +377,7 @@ class BrowserDriver:
             return False
 
 # ----------------------------------------------------------------------
-# Захват кадров
+# Захват кадров (теперь в JPG!)
 # ----------------------------------------------------------------------
 class FrameCapture:
     def __init__(self, config, driver):
@@ -395,13 +390,13 @@ class FrameCapture:
         folder = os.path.join("capture", date_str)
         if not os.path.exists(folder):
             return 0
-        return len([f for f in os.listdir(folder) if f.startswith("capt-") and f.endswith(".png")])
+        return len([f for f in os.listdir(folder) if f.startswith("capt-") and f.endswith(".jpg")])
 
     def capture(self):
         now = datetime.now()
         date_str = now.strftime("%Y%m%d")
         time_str = now.strftime("%H-%M-%S")
-        filename = f"capt-{date_str}_{time_str}.png"
+        filename = f"capt-{date_str}_{time_str}.jpg"   # ← JPG
         folder = os.path.join("capture", date_str)
         os.makedirs(folder, exist_ok=True)
         file_path = os.path.join(folder, filename)
@@ -435,11 +430,11 @@ class FrameCapture:
                     if self.driver.reload_via_url():
                         time.sleep(1)
                     return False
-                img.crop((66, 0, w-66, h)).save(file_path, quality=95)
+                img.crop((66, 0, w-66, h)).save(file_path, quality=92, optimize=True)  # ← JPG 92%
 
-            if os.path.getsize(file_path) / 1024 < 100:
+            if os.path.getsize(file_path) / 1024 < 50:  # JPG меньше, порог снижен
                 os.remove(file_path)
-                logging.warning("Обманка (<100 КБ) → перезагрузка")
+                logging.warning("Обманка (<50 КБ) → перезагрузка")
                 if self.driver.reload_via_url():
                     time.sleep(1)
                 return False
@@ -456,7 +451,7 @@ class FrameCapture:
             return False
 
 # ----------------------------------------------------------------------
-# Видеокодер
+# Видеокодер (с подготовкой и ускорением)
 # ----------------------------------------------------------------------
 class VideoEncoder:
     def __init__(self, config, gui_queue):
@@ -470,25 +465,44 @@ class VideoEncoder:
 
     def encode(self, date_str):
         video_path = self._get_video_path(date_str)
-        frames = sorted(glob.glob(os.path.join("capture", date_str, "capt-*.png")))
+        frames = sorted(glob.glob(os.path.join("capture", date_str, "capt-*.jpg")))
         if not frames:
             logging.info(f"Нет кадров для {date_str}")
             return
 
-        self.gui_queue.put(('video_start',))
+        total = len(frames)
 
-        h, w, _ = cv2.imread(frames[0]).shape
+        # ←←← Подготовка: сразу показываем 2% и надпись
+        self.gui_queue.put(('video_prepare', total))
+
+        # Предзагружаем все кадры в память — сильно ускоряет
+        frame_data = []
+        for f in frames:
+            img = cv2.imread(f)
+            if img is not None:
+                frame_data.append(img)
+
+        if not frame_data:
+            logging.warning("Не удалось загрузить ни одного кадра")
+            return
+
+        h, w, _ = frame_data[0].shape
         writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'mp4v'), self.config['video_fps'], (w, h))
 
-        total = len(frames)
-        for i, f in enumerate(frames):
-            writer.write(cv2.imread(f))
+        # ←←← Начинаем реальную конвертацию
+        self.gui_queue.put(('video_start',))
+
+        for i, frame in enumerate(frame_data):
+            writer.write(frame)
             self.gui_queue.put(('video_progress', i + 1, total))
 
         writer.release()
+
         summary = f"Конвертация завершена: {total} кадров → {os.path.basename(video_path)}"
         self.gui_queue.put(('video_done', summary))
         logging.info(summary)
+
+        time.sleep(5)  # пауза 5 сек перед удалением
 
         if self.config['delete_frames_after_video']:
             deleted = 0
@@ -504,7 +518,7 @@ class VideoEncoder:
             self.gui_queue.put(('delete_done', 0))
 
 # ----------------------------------------------------------------------
-# Watchdog
+# Остальные классы без изменений (ConfigWatcher и т.д.)
 # ----------------------------------------------------------------------
 class ConfigWatcher(FileSystemEventHandler):
     def __init__(self, config_manager, config_queue):
@@ -524,7 +538,7 @@ class ConfigWatcher(FileSystemEventHandler):
         self.config_queue.put(self.config_manager.config.copy())
 
 # ----------------------------------------------------------------------
-# GUI (PyQt6)
+# GUI
 # ----------------------------------------------------------------------
 class CaptureGUI(QMainWindow):
     def __init__(self):
@@ -535,8 +549,6 @@ class CaptureGUI(QMainWindow):
         icon_path = resource_path(os.path.join("resource", "eye.ico"))
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
-        else:
-            logging.warning(f"Иконка не найдена: {icon_path}")
 
         self.config_manager = ConfigManager()
         self.gui_queue = queue.Queue()
@@ -577,11 +589,9 @@ class CaptureGUI(QMainWindow):
         layout.addStretch()
 
         font = QFont("Consolas", 10)
-
         row = 0
 
         BTN_WIDTH = 120
-
         btn_container = QHBoxLayout()
         btn_container.setSpacing(5)
         btn_container.addStretch()
@@ -610,7 +620,6 @@ class CaptureGUI(QMainWindow):
             lbl_text.setFont(font)
             lbl_text.setAlignment(Qt.AlignmentFlag.AlignRight)
             grid.addWidget(lbl_text, row, 0)
-
             lbl_val = QLabel("")
             lbl_val.setFont(font)
             self.status_labels[key] = lbl_val
@@ -648,9 +657,9 @@ class CaptureGUI(QMainWindow):
         grid.addWidget(line2, row, 0, 1, 2)
         row += 1
 
-        self.video_status_label = QLabel("")
-        self.video_status_label.setFont(font)
-        grid.addWidget(self.video_status_label, row, 0, 1, 2)
+        self.video_plan_label = QLabel("")
+        self.video_plan_label.setFont(font)
+        grid.addWidget(self.video_plan_label, row, 0, 1, 2)
         row += 1
 
         self.fps_label = QLabel("")
@@ -665,58 +674,50 @@ class CaptureGUI(QMainWindow):
         grid.addWidget(self.video_pb, row, 0, 1, 2)
         row += 1
 
-        self.delete_status_label = QLabel("")
-        self.delete_status_label.setFont(font)
-        self.delete_status_label.setStyleSheet("color: blue;")
-        grid.addWidget(self.delete_status_label, row, 0, 1, 2)
+        self.video_result_label = QLabel("")
+        self.video_result_label.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+        self.video_result_label.setWordWrap(True)
+        self.video_result_label.setStyleSheet("color: #0066cc;")
+        grid.addWidget(self.video_result_label, row, 0, 1, 2)
 
         return page
 
     def build_settings_page(self):
+        # без изменений
         page = QWidget()
         layout = QVBoxLayout(page)
-
         self.config_text = QTextEdit()
         self.config_text.setFont(QFont("Consolas", 10))
         layout.addWidget(self.config_text)
-
         btn_layout = QHBoxLayout()
         save_btn = QPushButton("Сохранить")
         save_btn.clicked.connect(self.save_config)
         cancel_btn = QPushButton("Отмена")
         cancel_btn.clicked.connect(self.show_status_page)
-
         btn_layout.addWidget(save_btn)
         btn_layout.addWidget(cancel_btn)
         layout.addLayout(btn_layout)
-
         return page
 
     def build_log_page(self):
+        # без изменений
         page = QWidget()
         layout = QVBoxLayout(page)
-
         self.log_text = QTextEdit()
         self.log_text.setFont(QFont("Consolas", 10))
         self.log_text.setReadOnly(True)
         layout.addWidget(self.log_text)
-
         bottom_layout = QHBoxLayout()
-
         self.auto_update_cb = QCheckBox("Автообновление")
         self.auto_update_cb.setChecked(True)
         self.auto_update_cb.stateChanged.connect(self.toggle_log_auto_update)
         bottom_layout.addWidget(self.auto_update_cb)
-
         close_btn = QPushButton("Закрыть")
         close_btn.clicked.connect(self.show_status_page)
         bottom_layout.addWidget(close_btn)
-
         layout.addLayout(bottom_layout)
-
         self.log_timer = QTimer()
         self.log_timer.timeout.connect(self.update_log_display)
-
         return page
 
     def show_status_page(self):
@@ -749,9 +750,8 @@ class CaptureGUI(QMainWindow):
     def update_log_display(self):
         log_path = get_current_log_path()
         if not os.path.exists(log_path):
-            self.log_text.setPlainText("# Файл console.log не найден")
+            self.log_text.setPlainText("# Файл capture.log не найден")
             return
-
         try:
             with open(log_path, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -761,27 +761,24 @@ class CaptureGUI(QMainWindow):
             self.log_text.setTextCursor(cursor)
             self.log_text.ensureCursorVisible()
         except Exception as e:
-            self.log_text.setPlainText(f"# Ошибка чтения console.log: {e}")
+            self.log_text.setPlainText(f"# Ошибка чтения capture.log: {e}")
 
     def save_config(self):
+        # без изменений
         try:
             text = self.config_text.toPlainText()
             config_data = YAML().load(text)
             errors, parsed = validate_config(config_data)
-
             if errors:
                 raise ValueError("\n".join(errors))
-
             config_data.update({
                 'time_period_interval': parsed['interval'],
                 'video_fps': parsed['fps'],
                 'delete_frames_after_video': parsed['delete_frames']
             })
-
             self.config_manager.update(config_data, self.gui_queue)
             self.config_queue.put(config_data.copy())
             self.show_status_page()
-
         except Exception as e:
             logging.warning(f"Ошибка сохранения: {e}")
             self.config_manager._load()
@@ -794,18 +791,14 @@ class CaptureGUI(QMainWindow):
             lbl.setText(str(cfg[key]))
         delete = "Да" if cfg['delete_frames_after_video'] else "Нет"
         self.fps_label.setText(f"Частота кадров в видео: {cfg['video_fps']} | Удаление кадров после конвертации: {delete}")
-        self.update_video_time_label()
-
-    def update_video_time_label(self):
-        self.video_status_label.setText(f"Планируемое время запуска конвертации после: {self.config_manager['time_video']}")
+        self.video_plan_label.setText(f"Планируемое время запуска конвертации после: {cfg['time_video']}")
 
     def update_captured_count(self):
         total = self.frame_capture.count_existing_frames()
         self.captured_count_label.setText(f"Сохранено кадров за текущие сутки: {total}")
 
     def reset_video_status(self):
-        self.update_video_time_label()
-        self.delete_status_label.setText("")
+        self.video_result_label.setText("")
         self.video_pb.setValue(0)
         self.video_pb.setMinimum(0)
         self.video_pb.setMaximum(1)
@@ -849,26 +842,33 @@ class CaptureGUI(QMainWindow):
                         self.last_frame_status_label.setText(f"Последний кадр: {info or 'Нет'}")
                         self.last_frame_status_label.setStyleSheet("color: black")
 
-                elif typ == 'video_start':
-                    self.video_status_label.setText("Идет конвертация — 0/0")
-                    self.video_pb.setMaximum(100)
-                    self.video_pb.setValue(0)
+                elif typ == 'video_prepare':  # ← новая команда
+                    total = msg[1]
+                    self.video_result_label.setText("Подготовка к конвертации...")
+                    self.video_pb.setMaximum(total)
+                    self.video_pb.setValue(int(total * 0.02))  # 2%
                     self.video_pb.setTextVisible(True)
+
+                elif typ == 'video_start':
+                    self.video_result_label.setText("Идет конвертация — 0/0")
+                    self.video_pb.setValue(0)  # сбрасываем до 0 и дальше будет расти
 
                 elif typ == 'video_progress':
-                    self.video_pb.setMaximum(msg[2])
-                    self.video_pb.setValue(msg[1])
-                    self.video_status_label.setText(f"Идет конвертация — {msg[1]}/{msg[2]}")
+                    current, total = msg[1], msg[2]
+                    self.video_result_label.setText(f"Идет конвертация — {current}/{total}")
+                    self.video_pb.setValue(current)
 
                 elif typ == 'video_done':
-                    self.video_status_label.setText(msg[1])
+                    summary = msg[1]
+                    self.video_result_label.setText(summary)
                     self.video_pb.setValue(self.video_pb.maximum())
-                    self.video_pb.setTextVisible(True)
 
                 elif typ == 'delete_done':
                     deleted = msg[1]
                     if deleted > 0:
-                        self.delete_status_label.setText(f"Удалено кадров: {deleted}")
+                        self.video_result_label.setText(f"Удалено кадров: {deleted}")
+                    else:
+                        self.video_result_label.setText("")
                     self.update_captured_count()
                     self.schedule_reset()
 
@@ -881,7 +881,7 @@ class CaptureGUI(QMainWindow):
                         self.capture_pb.setTextVisible(True)
 
                 elif typ == 'config_update':
-                    self.update_video_time_label()
+                    self.update_status_display()
                     self.app.reset_video_trigger()
 
         except queue.Empty:
@@ -896,9 +896,14 @@ class CaptureGUI(QMainWindow):
             event.ignore()
 
 # ----------------------------------------------------------------------
-# Основной контроллер
+# Основной контроллер (без изменений)
 # ----------------------------------------------------------------------
 class CaptureAppGUI:
+    # ... (полностью тот же код, что и в предыдущей версии)
+    # только в run() при запуске конвертации:
+    # self.encoder.encode(today_str)
+    # всё остальное идентично
+
     def __init__(self, config_manager, driver, frame_capture, encoder, gui_queue, config_queue):
         self.config_manager = config_manager
         self.driver = driver
@@ -932,7 +937,7 @@ class CaptureAppGUI:
         return next_start.strftime('%d.%m.%Y %H:%M')
 
     def _update_status(self):
-        total = self.frame_capture.count_existing_frames()  # ИСПРАВЛЕНО: убрано "ures"
+        total = self.frame_capture.count_existing_frames()
         last_file = os.path.basename(self.frame_capture.last_file) if self.frame_capture.last_file else 'Нет'
         self.gui_queue.put(('status', total, last_file))
 
@@ -958,7 +963,6 @@ class CaptureAppGUI:
             en_total = self._get_minutes(self.config_manager['time_end'])
             new_state = "work" if st_total <= cur_total < en_total else "off"
 
-            # Ротация лога при смене даты
             if self.last_log_date != today_str:
                 rotate_log_if_needed()
                 self.last_log_date = today_str
@@ -980,17 +984,14 @@ class CaptureAppGUI:
                 begin_min = st_total
                 end_min = en_total
                 current_min = cur_total
-
+                progress = 0
                 if end_min > begin_min:
                     progress = (current_min - begin_min) / (end_min - begin_min) * 100
                     progress = max(0, min(100, progress))
-                else:
-                    progress = 0
 
                 current_time = now.strftime("%H:%M")
                 remaining_min = max(0, end_min - current_min)
                 remaining_str = f"{remaining_min // 60:02d}:{remaining_min % 60:02d}"
-
                 self.gui_queue.put(('capture_progress', progress, current_time, remaining_str))
 
             if self.current_state == "off":
@@ -1008,7 +1009,6 @@ class CaptureAppGUI:
                         continue
 
                     logging.info(f"Запуск конвертации за {today_str} в {self.config_manager['time_video']}")
-                    self.gui_queue.put(('video_start',))
                     self.encoder.encode(today_str)
                     self.last_video_triggered = True
 
@@ -1051,7 +1051,6 @@ if __name__ == "__main__":
     cleanup_processes()
     app = QApplication(sys.argv)
     app.setStyle(QStyleFactory.create('Fusion'))
-
     palette = QPalette()
     palette.setColor(QPalette.ColorRole.Highlight, QColor(0, 120, 215))
     app.setPalette(palette)
