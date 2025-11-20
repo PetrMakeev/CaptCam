@@ -4,6 +4,7 @@ import sys
 import queue
 import threading
 import logging
+from datetime import datetime
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -29,7 +30,7 @@ class CaptureGUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Захват кадров с камеры ...")
-        # Начальный размер — с превью (чекбокс включён по умолчанию)
+        # Начальный размер — с превью (чекбокс включён по умолчанию — выключен)
         self.setFixedSize(560, 380)
 
         icon_path = resource_path(os.path.join("resource", "eye.ico"))
@@ -46,11 +47,18 @@ class CaptureGUI(QMainWindow):
         self.last_frame_path = None
         self.show_preview = False
 
+        # Для постоянного отображения статуса конвертации
+        self.video_total_frames = 0
+        self.video_processed_frames = 0
+        self.is_encoding_now = False
+        self.current_video_date = datetime.now().strftime("%Y%m%d")
+
         self.init_ui()
         self.start_background()
         self.setup_timers()
 
         QTimer.singleShot(500, self.update_status_display)
+        QTimer.singleShot(500, self.update_video_status_display)
 
     def init_ui(self):
         central = QWidget()
@@ -166,20 +174,23 @@ class CaptureGUI(QMainWindow):
         grid.addWidget(self.video_pb, row, 0, 1, 2)
         row += 1
 
-        self.video_result_label = QLabel("")
-        self.video_result_label.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
-        self.video_result_label.setWordWrap(True)
-        self.video_result_label.setStyleSheet("color: #0066cc;")
-        grid.addWidget(self.video_result_label, row, 0, 1, 2)
+        # Постоянные строки статуса конвертации
+        self.video_frames_label = QLabel("Конвертация кадров: всего — —, обработано — —")
+        self.video_frames_label.setFont(QFont("Consolas", 10))
+        grid.addWidget(self.video_frames_label, row, 0, 1, 2)
+        row += 1
 
-        # ==================== РАЗДЕЛИТЕЛЬНАЯ ЛИНИЯ ====================
-        layout.addSpacing(20)
+        self.video_filename_label = QLabel("Будет создан видеофайл — video-XXXXXXXX.mp4")
+        self.video_filename_label.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+        grid.addWidget(self.video_filename_label, row, 0, 1, 2)
+        row += 1
+
+        # ==================== РАЗДЕЛИТЕЛЬ ====================
         separator = QFrame()
         separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setFrameShadow(QFrame.Shadow.Sunken)
         layout.addWidget(separator)
 
-        # ==================== ЧЕКБОКС ====================
+        # ==================== ЧЕКБОКС ПРЕВЬЮ ====================
         preview_ctrl = QHBoxLayout()
         preview_ctrl.addStretch()
         self.preview_checkbox = QCheckBox("Показывать последний кадр")
@@ -196,9 +207,7 @@ class CaptureGUI(QMainWindow):
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_label.setText("Последний кадр появится здесь")
         layout.addWidget(self.preview_label)
-
-        # === НОВОЕ: сразу скрываем превью при старте
-        self.preview_label.hide()        
+        self.preview_label.hide()
 
         layout.addStretch()
         return page
@@ -253,19 +262,66 @@ class CaptureGUI(QMainWindow):
         return page
 
     # ============================================================
-    # Переключение превью + изменение размера окна
+    # Вспомогательная функция пути к видео
+    # ============================================================
+    def _get_video_path(self, date_str=None):
+        if date_str is None:
+            date_str = datetime.now().strftime("%Y%m%d")
+        return os.path.join("capture", date_str, f"video-{date_str}.mp4")
+
+    # ============================================================
+    # Обновление строки с именем видеофайла + статус конвертации
+    # ============================================================
+    def update_video_status_display(self):
+        today = datetime.now().strftime("%Y%m%d")
+        video_name = f"video-{today}.mp4"
+        video_full_path = self._get_video_path(today)
+
+        # Сброс при смене суток
+        if today != self.current_video_date:
+            self.current_video_date = today
+            self.video_total_frames = 0
+            self.video_processed_frames = 0
+            self.is_encoding_now = False
+
+        # Определяем текст и цвет
+        if os.path.exists(video_full_path):
+            text = f"Создан видеофайл — {video_name}"
+            style = "color: green; font-weight: bold;"
+        elif self.is_encoding_now:
+            text = f"Идёт создание видеофайла — {video_name}"
+            style = "color: orange; font-weight: bold;"
+        else:
+            text = f"Будет создан видеофайл — {video_name}"
+            style = "color: black;"
+
+        self.video_filename_label.setText(text)
+        self.video_filename_label.setStyleSheet(style)
+
+        # Строка с количеством кадров
+        if self.is_encoding_now:
+            self.video_frames_label.setText(
+                f"Конвертация кадров: всего — {self.video_total_frames}, обработано — {self.video_processed_frames}"
+            )
+        else:
+            count = self.frame_capture.count_existing_frames() if hasattr(self, 'frame_capture') else 0
+            total_str = str(count) if count > 0 else "—"
+            self.video_frames_label.setText(
+                f"Конвертация кадров: всего — {total_str}, обработано — —"
+            )
+
+    # ============================================================
+    # Остальные методы
     # ============================================================
     def toggle_preview(self, state):
         show = (state == Qt.CheckState.Checked.value)
         self.show_preview = show
-
         if show:
             self.preview_label.show()
             QTimer.singleShot(0, lambda: self.setFixedSize(560, 580))
         else:
             self.preview_label.hide()
             QTimer.singleShot(0, lambda: self.setFixedSize(560, 380))
-
         self.update_preview()
 
     def update_preview(self):
@@ -273,12 +329,10 @@ class CaptureGUI(QMainWindow):
             self.preview_label.setPixmap(QPixmap())
             self.preview_label.setText("Последний кадр появится здесь" if self.show_preview else "")
             return
-
         pixmap = QPixmap(self.last_frame_path)
         if pixmap.isNull():
             self.preview_label.setText("Ошибка загрузки изображения")
             return
-
         scaled = pixmap.scaled(
             self.preview_label.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
@@ -290,12 +344,10 @@ class CaptureGUI(QMainWindow):
         super().resizeEvent(event)
         QTimer.singleShot(50, self.update_preview)
 
-    # ============================================================
-    # Остальные методы (без изменений)
-    # ============================================================
     def show_status_page(self):
         self.stacked.setCurrentIndex(0)
         self.update_status_display()
+        self.update_video_status_display()
         try:
             with open('config.yaml', 'r', encoding='utf-8') as f:
                 self.config_text.setPlainText(f.read())
@@ -369,16 +421,7 @@ class CaptureGUI(QMainWindow):
         delete = "Да" if cfg['delete_frames_after_video'] else "Нет"
         self.fps_label.setText(f"Частота кадров в видео: {cfg['video_fps']} | Удаление кадров после конвертации: {delete}")
         self.video_plan_label.setText(f"Планируемое время запуска конвертации после: {cfg['time_video']}")
-
-    def reset_video_status(self):
-        self.video_result_label.setText("")
-        self.video_pb.setValue(0)
-        self.video_pb.setMinimum(0)
-        self.video_pb.setMaximum(1)
-        self.video_pb.setTextVisible(False)
-
-    def schedule_reset(self):
-        QTimer.singleShot(10000, self.reset_video_status)
+        self.update_video_status_display()
 
     def start_background(self):
         self.driver = BrowserDriver(self.config_manager)
@@ -398,6 +441,11 @@ class CaptureGUI(QMainWindow):
         self.queue_timer.timeout.connect(self.process_queue)
         self.queue_timer.start(100)
 
+        # Таймер для обновления имени видео и статуса при смене суток
+        self.video_status_timer = QTimer()
+        self.video_status_timer.timeout.connect(self.update_video_status_display)
+        self.video_status_timer.start(5000)
+
     def process_queue(self):
         try:
             while True:
@@ -407,7 +455,6 @@ class CaptureGUI(QMainWindow):
                 if typ == 'status':
                     total = msg[1]
                     info = msg[2]
-
                     self.captured_count_label.setText(f"Сохранено кадров за текущие сутки: {total}")
 
                     if isinstance(info, str) and info.startswith("stop:"):
@@ -425,38 +472,35 @@ class CaptureGUI(QMainWindow):
                             self.last_frame_status_label.setText("Последний кадр: Нет")
                             self.last_frame_status_label.setStyleSheet("color: black;")
                             self.last_frame_path = None
-                            self.update_preview()
+                        self.update_preview()
+
+                    self.update_video_status_display()
 
                 elif typ == 'video_prepare':
-                    self.video_result_label.setText("Подготовка к конвертации")
-                    self.video_pb.setMaximum(100)
-                    self.video_pb.setValue(2)
-                    self.video_pb.setTextVisible(True)
+                    self.is_encoding_now = True
+                    self.update_video_status_display()
 
                 elif typ == 'video_start':
-                    total = msg[1]
-                    self.video_result_label.setText(f"Идет конвертация — 0/{total}")
-                    self.video_pb.setMaximum(total)
+                    self.video_total_frames = msg[1]
+                    self.video_processed_frames = 0
+                    self.is_encoding_now = True
+                    self.video_pb.setMaximum(self.video_total_frames)
                     self.video_pb.setValue(0)
+                    self.update_video_status_display()
 
                 elif typ == 'video_progress':
-                    current, total = msg[1], msg[2]
-                    self.video_result_label.setText(f"Идет конвертация — {current}/{total}")
-                    self.video_pb.setValue(current)
+                    self.video_processed_frames = msg[1]
+                    self.video_pb.setValue(self.video_processed_frames)
+                    self.update_video_status_display()
 
                 elif typ == 'video_done':
-                    self.video_result_label.setText(msg[1])
-                    self.video_pb.setValue(self.video_pb.maximum())
+                    self.video_pb.setMaximum(1)
+                    self.video_pb.setValue(0)
+                    self.video_pb.setTextVisible(False)
+                    self.update_video_status_display()
 
                 elif typ == 'delete_done':
-                    deleted = msg[1]
-                    if deleted > 0:
-                        self.video_result_label.setText(f"Удалено кадров: {deleted}")
-                        self.last_frame_path = None
-                        self.update_preview()
-                    else:
-                        self.video_result_label.setText("")
-                    self.schedule_reset()
+                    self.update_video_status_display()
 
                 elif typ == 'capture_progress':
                     self.capture_pb.setValue(int(msg[1]))
