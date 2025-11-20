@@ -4,4 +4,4 @@ time_end: 23:10
 time_period_interval: 2
 time_video: 23:11
 video_fps: 60
-delete_frames_after_video: true
+delete_frames_after_video: false

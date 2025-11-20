@@ -1,1 +1,0 @@
-pyinstaller --name CaptCam --onefile --windowed --add-binary "chromedriver.exe;." --add-data "resource/eye.ico;resource" --icon="resource/eye.ico" --clean main_qt6.py
