@@ -8,29 +8,28 @@ import logging
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QLabel, QPushButton, QProgressBar, QTextEdit,
-    QFrame, QStackedWidget, QMessageBox, QStyleFactory,
+    QFrame, QStackedWidget, QMessageBox,
     QCheckBox
 )
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QIcon, QFont, QPalette, QColor
+from PyQt6.QtGui import QIcon, QFont, QColor, QPixmap
 
 from ruamel.yaml import YAML
 from watchdog.observers import Observer
 
-from main_classes import (FrameCapture, VideoEncoder, 
-                          ConfigManager, CaptureAppGUI, 
-                          BrowserDriver, ConfigWatcher,
-                          cleanup_processes)
+from main_classes import (
+    FrameCapture, VideoEncoder, ConfigManager, CaptureAppGUI,
+    BrowserDriver, ConfigWatcher, cleanup_processes
+)
 
 from main_function import get_current_log_path, validate_config, resource_path
 
-# ----------------------------------------------------------------------
-# GUI (PyQt6)
-# ----------------------------------------------------------------------
+
 class CaptureGUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Захват кадров с камеры ...")
+        # Начальный размер — с превью (чекбокс включён по умолчанию)
         self.setFixedSize(560, 380)
 
         icon_path = resource_path(os.path.join("resource", "eye.ico"))
@@ -44,6 +43,9 @@ class CaptureGUI(QMainWindow):
         self.config_queue = queue.Queue()
 
         self.status_labels = {}
+        self.last_frame_path = None
+        self.show_preview = False
+
         self.init_ui()
         self.start_background()
         self.setup_timers()
@@ -70,36 +72,35 @@ class CaptureGUI(QMainWindow):
 
         self.show_status_page()
 
+    # ============================================================
+    # Страница статуса + превью
+    # ============================================================
     def build_status_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
+
         grid = QGridLayout()
         layout.addLayout(grid)
-        layout.addStretch()
 
         font = QFont("Consolas", 10)
-
         row = 0
-
         BTN_WIDTH = 120
 
+        # Кнопки Настройки / Лог
         btn_container = QHBoxLayout()
-        btn_container.setSpacing(5)
         btn_container.addStretch()
-
         btn_settings = QPushButton("Настройки")
         btn_settings.setFixedWidth(BTN_WIDTH)
         btn_settings.clicked.connect(self.show_settings_page)
-        btn_container.addWidget(btn_settings)
-
         btn_log = QPushButton("Лог")
         btn_log.setFixedWidth(BTN_WIDTH)
         btn_log.clicked.connect(self.show_log_page)
+        btn_container.addWidget(btn_settings)
         btn_container.addWidget(btn_log)
-
         grid.addLayout(btn_container, row, 0, 1, 2)
         row += 1
 
+        # Параметры конфига
         labels = {
             'adress_url': 'Адрес камеры',
             'time_begin': 'Время начала захвата',
@@ -111,7 +112,6 @@ class CaptureGUI(QMainWindow):
             lbl_text.setFont(font)
             lbl_text.setAlignment(Qt.AlignmentFlag.AlignRight)
             grid.addWidget(lbl_text, row, 0)
-
             lbl_val = QLabel("")
             lbl_val.setFont(font)
             self.status_labels[key] = lbl_val
@@ -172,8 +172,40 @@ class CaptureGUI(QMainWindow):
         self.video_result_label.setStyleSheet("color: #0066cc;")
         grid.addWidget(self.video_result_label, row, 0, 1, 2)
 
+        # ==================== РАЗДЕЛИТЕЛЬНАЯ ЛИНИЯ ====================
+        layout.addSpacing(20)
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(separator)
+
+        # ==================== ЧЕКБОКС ====================
+        preview_ctrl = QHBoxLayout()
+        preview_ctrl.addStretch()
+        self.preview_checkbox = QCheckBox("Показывать последний кадр")
+        self.preview_checkbox.setChecked(False)
+        self.preview_checkbox.stateChanged.connect(self.toggle_preview)
+        preview_ctrl.addWidget(self.preview_checkbox)
+        preview_ctrl.addStretch()
+        layout.addLayout(preview_ctrl)
+
+        # ==================== ПРЕВЬЮ ====================
+        self.preview_label = QLabel()
+        self.preview_label.setMinimumHeight(220)
+        self.preview_label.setStyleSheet("background-color: #f0f0f0; border: 1px solid #cccccc;")
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setText("Последний кадр появится здесь")
+        layout.addWidget(self.preview_label)
+
+        # === НОВОЕ: сразу скрываем превью при старте
+        self.preview_label.hide()        
+
+        layout.addStretch()
         return page
 
+    # ============================================================
+    # Страница настроек
+    # ============================================================
     def build_settings_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -187,13 +219,15 @@ class CaptureGUI(QMainWindow):
         save_btn.clicked.connect(self.save_config)
         cancel_btn = QPushButton("Отмена")
         cancel_btn.clicked.connect(self.show_status_page)
-
         btn_layout.addWidget(save_btn)
         btn_layout.addWidget(cancel_btn)
         layout.addLayout(btn_layout)
 
         return page
 
+    # ============================================================
+    # Страница лога
+    # ============================================================
     def build_log_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -204,7 +238,6 @@ class CaptureGUI(QMainWindow):
         layout.addWidget(self.log_text)
 
         bottom_layout = QHBoxLayout()
-
         self.auto_update_cb = QCheckBox("Автообновление")
         self.auto_update_cb.setChecked(True)
         self.auto_update_cb.stateChanged.connect(self.toggle_log_auto_update)
@@ -213,14 +246,53 @@ class CaptureGUI(QMainWindow):
         close_btn = QPushButton("Закрыть")
         close_btn.clicked.connect(self.show_status_page)
         bottom_layout.addWidget(close_btn)
-
         layout.addLayout(bottom_layout)
 
         self.log_timer = QTimer()
         self.log_timer.timeout.connect(self.update_log_display)
-
         return page
 
+    # ============================================================
+    # Переключение превью + изменение размера окна
+    # ============================================================
+    def toggle_preview(self, state):
+        show = (state == Qt.CheckState.Checked.value)
+        self.show_preview = show
+
+        if show:
+            self.preview_label.show()
+            QTimer.singleShot(0, lambda: self.setFixedSize(560, 580))
+        else:
+            self.preview_label.hide()
+            QTimer.singleShot(0, lambda: self.setFixedSize(560, 380))
+
+        self.update_preview()
+
+    def update_preview(self):
+        if not self.show_preview or not self.last_frame_path or not os.path.exists(self.last_frame_path):
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setText("Последний кадр появится здесь" if self.show_preview else "")
+            return
+
+        pixmap = QPixmap(self.last_frame_path)
+        if pixmap.isNull():
+            self.preview_label.setText("Ошибка загрузки изображения")
+            return
+
+        scaled = pixmap.scaled(
+            self.preview_label.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.preview_label.setPixmap(scaled)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(50, self.update_preview)
+
+    # ============================================================
+    # Остальные методы (без изменений)
+    # ============================================================
     def show_status_page(self):
         self.stacked.setCurrentIndex(0)
         self.update_status_display()
@@ -241,6 +313,8 @@ class CaptureGUI(QMainWindow):
     def show_log_page(self):
         self.stacked.setCurrentIndex(2)
         self.update_log_display()
+        if self.auto_update_cb.isChecked():
+            self.log_timer.start(500)
 
     def toggle_log_auto_update(self, state):
         if state == Qt.CheckState.Checked.value:
@@ -253,7 +327,6 @@ class CaptureGUI(QMainWindow):
         if not os.path.exists(log_path):
             self.log_text.setPlainText("# Файл capture.log не найден")
             return
-
         try:
             with open(log_path, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -270,7 +343,6 @@ class CaptureGUI(QMainWindow):
             text = self.config_text.toPlainText()
             config_data = YAML().load(text)
             errors, parsed = validate_config(config_data)
-
             if errors:
                 raise ValueError("\n".join(errors))
 
@@ -298,17 +370,12 @@ class CaptureGUI(QMainWindow):
         self.fps_label.setText(f"Частота кадров в видео: {cfg['video_fps']} | Удаление кадров после конвертации: {delete}")
         self.video_plan_label.setText(f"Планируемое время запуска конвертации после: {cfg['time_video']}")
 
-    def update_captured_count(self):
-        total = self.frame_capture.count_existing_frames()
-        self.captured_count_label.setText(f"Сохранено кадров за текущие сутки: {total}")
-
     def reset_video_status(self):
         self.video_result_label.setText("")
         self.video_pb.setValue(0)
         self.video_pb.setMinimum(0)
         self.video_pb.setMaximum(1)
         self.video_pb.setTextVisible(False)
-        self.update_captured_count()
 
     def schedule_reset(self):
         QTimer.singleShot(10000, self.reset_video_status)
@@ -338,14 +405,27 @@ class CaptureGUI(QMainWindow):
                 typ = msg[0]
 
                 if typ == 'status':
-                    self.captured_count_label.setText(f"Сохранено кадров за текущие сутки: {msg[1]}")
+                    total = msg[1]
                     info = msg[2]
-                    if info.startswith("stop:"):
+
+                    self.captured_count_label.setText(f"Сохранено кадров за текущие сутки: {total}")
+
+                    if isinstance(info, str) and info.startswith("stop:"):
                         self.last_frame_status_label.setText(f"Захват остановлен до {info[5:]}")
                         self.last_frame_status_label.setStyleSheet("color: red;")
+                        self.last_frame_path = None
+                        self.update_preview()
                     else:
-                        self.last_frame_status_label.setText(f"Последний кадр: {info or 'Нет'}")
-                        self.last_frame_status_label.setStyleSheet("color: black")
+                        if info and os.path.exists(info):
+                            self.last_frame_path = info
+                            self.last_frame_status_label.setText(f"Последний кадр: {os.path.basename(info)}")
+                            self.last_frame_status_label.setStyleSheet("color: black;")
+                            self.update_preview()
+                        else:
+                            self.last_frame_status_label.setText("Последний кадр: Нет")
+                            self.last_frame_status_label.setStyleSheet("color: black;")
+                            self.last_frame_path = None
+                            self.update_preview()
 
                 elif typ == 'video_prepare':
                     self.video_result_label.setText("Подготовка к конвертации")
@@ -365,17 +445,17 @@ class CaptureGUI(QMainWindow):
                     self.video_pb.setValue(current)
 
                 elif typ == 'video_done':
-                    summary = msg[1]
-                    self.video_result_label.setText(summary)
+                    self.video_result_label.setText(msg[1])
                     self.video_pb.setValue(self.video_pb.maximum())
 
                 elif typ == 'delete_done':
                     deleted = msg[1]
                     if deleted > 0:
                         self.video_result_label.setText(f"Удалено кадров: {deleted}")
+                        self.last_frame_path = None
+                        self.update_preview()
                     else:
                         self.video_result_label.setText("")
-                    self.update_captured_count()
                     self.schedule_reset()
 
                 elif typ == 'capture_progress':

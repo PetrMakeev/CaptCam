@@ -63,12 +63,14 @@ class CaptureAppGUI:
 
     def _update_status(self):
         total = self.frame_capture.count_existing_frames()
-        last_file = os.path.basename(self.frame_capture.last_file) if self.frame_capture.last_file else 'Нет'
-        self.gui_queue.put(('status', total, last_file))
+        # ИЗМЕНЕНО: передаём полный путь, а не только basename
+        last_file_full = self.frame_capture.last_file if self.frame_capture.last_file else None
+        self.gui_queue.put(('status', total, last_file_full))
 
     def _send_stopped(self):
         total = self.frame_capture.count_existing_frames()
         next_str = self._next_start_time()
+        # Передаём строку с префиксом "stop:", чтобы GUI понимала, что это не файл
         self.gui_queue.put(('status', total, f"stop:{next_str}"))
 
     def run(self):
