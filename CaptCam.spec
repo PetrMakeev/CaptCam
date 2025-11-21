@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['main_qt6.py'],
+    ['main.py'],
     pathex=[],
     binaries=[('chromedriver.exe', '.')],
     datas=[('resource/eye.ico', 'resource')],
