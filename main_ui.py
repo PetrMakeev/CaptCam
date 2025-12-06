@@ -430,7 +430,7 @@ class CaptureGUI(QMainWindow):
     def start_background(self):
         self.driver = BrowserDriver(self.config_manager)
         self.frame_capture = FrameCapture(self.config_manager, self.driver)
-        self.encoder = VideoEncoder(self.config_manager, self.gui_queue)
+        self.encoder = VideoEncoder(self.config_manager, self.gui_queue, self.frame_capture)
         self.app = CaptureAppGUI(self.config_manager, self.driver, self.frame_capture, self.encoder, self.gui_queue, self.config_queue)
         threading.Thread(target=self.app.run, daemon=True).start()
         self.start_watchdog()

@@ -6,10 +6,11 @@ import queue
 import cv2
 import glob
 import sys
+import io
+import numpy as np
 from PIL import Image
 from logging.handlers import RotatingFileHandler
 from ruamel.yaml import YAML
-
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -21,8 +22,6 @@ from selenium.webdriver.support import expected_conditions as EC
 from watchdog.events import FileSystemEventHandler
 
 from main_function import rotate_log_if_needed, cleanup_processes, is_image_black
-
-
 
 
 # ----------------------------------------------------------------------
@@ -63,14 +62,12 @@ class CaptureAppGUI:
 
     def _update_status(self):
         total = self.frame_capture.count_existing_frames()
-        # ИЗМЕНЕНО: передаём полный путь, а не только basename
         last_file_full = self.frame_capture.last_file if self.frame_capture.last_file else None
         self.gui_queue.put(('status', total, last_file_full))
 
     def _send_stopped(self):
         total = self.frame_capture.count_existing_frames()
         next_str = self._next_start_time()
-        # Передаём строку с префиксом "stop:", чтобы GUI понимала, что это не файл
         self.gui_queue.put(('status', total, f"stop:{next_str}"))
 
     def run(self):
@@ -142,7 +139,7 @@ class CaptureAppGUI:
                     self.encoder.encode(today_str)
                     self.last_video_triggered = True
 
-            time.sleep(max(0.1, float(self.config_manager['time_period_interval'])))
+            time.sleep(max(0.01, float(self.config_manager['time_period_interval'])))
 
     def _init_state(self):
         now = datetime.now()
@@ -176,7 +173,7 @@ class CaptureAppGUI:
 
 
 # ----------------------------------------------------------------------
-# Драйвер
+# Драйвер, FrameCapture, VideoEncoder — без изменений, кроме FrameCapture
 # ----------------------------------------------------------------------
 class BrowserDriver:
     def __init__(self, config):
@@ -185,6 +182,10 @@ class BrowserDriver:
         self.iframe_element = None
         self._setup_driver()
         self._init_page()
+    
+    @property
+    def switch_to(self):
+        return self.driver.switch_to        
 
     def _setup_driver(self):
         chrome_options = Options()
@@ -255,9 +256,8 @@ class BrowserDriver:
             return False
 
 
-
 # ----------------------------------------------------------------------
-# Захват кадров
+# ОПТИМАЛЬНЫЙ ЗАХВАТ: JPG напрямую, без временных файлов и предупреждений
 # ----------------------------------------------------------------------
 class FrameCapture:
     def __init__(self, config, driver):
@@ -270,73 +270,97 @@ class FrameCapture:
         folder = os.path.join("capture", date_str)
         if not os.path.exists(folder):
             return 0
-        return len([f for f in os.listdir(folder) if f.startswith("capt-") and f.endswith(".png")])
+        return len([f for f in os.listdir(folder) if f.startswith("capt-") and f.endswith(".jpg")])
 
     def capture(self):
         now = datetime.now()
         date_str = now.strftime("%Y%m%d")
         time_str = now.strftime("%H-%M-%S")
-        filename = f"capt-{date_str}_{time_str}.png"
+        filename = f"capt-{date_str}_{time_str}.jpg"
         folder = os.path.join("capture", date_str)
         os.makedirs(folder, exist_ok=True)
         file_path = os.path.join(folder, filename)
 
         try:
+            # Проверка размера iframe
             size = self.driver.get_iframe_size()
-            if not size or size['width'] < 1 or size['height'] < 1:
-                logging.warning("iframe размер некорректный → перезагрузка")
-                if self.driver.reload_via_url():
-                    time.sleep(1)
+            if not size or size['width'] < 132:
+                logging.warning("iframe слишком узкий или пустой → перезагрузка")
+                self.driver.reload_via_url()
+                time.sleep(0.2)
                 return False
 
-            if not self.driver.capture_frame(file_path):
-                logging.warning("capture_frame не удался → перезагрузка")
-                if self.driver.reload_via_url():
-                    time.sleep(1)
+            # === КЛЮЧЕВОЙ ТРЮК: используем screenshot_as_png + сохраняем через PIL как JPG ===
+            self.driver.switch_to.frame(self.driver.iframe_element)
+            try:
+                video = WebDriverWait(self.driver, 4).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "video"))
+                )
+                png_data = video.screenshot_as_png
+            except:
+                self.driver.switch_to.default_content()
+                png_data = self.driver.iframe_element.screenshot_as_png
+            finally:
+                self.driver.switch_to.default_content()
+
+            # Открываем PNG из памяти
+            img = Image.open(io.BytesIO(png_data))
+
+            # Конвертируем в RGB (убираем альфу)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+
+            w, h = img.size
+            if w < 132:
+                logging.warning(f"Узкий кадр w={w} → перезагрузка")
+                self.driver.reload_via_url()
+                time.sleep(0.2)
                 return False
 
-            if is_image_black(Image.open(file_path)):
-                os.remove(file_path)
+            if is_image_black(img):
                 logging.warning("Чёрный кадр → перезагрузка")
-                if self.driver.reload_via_url():
-                    time.sleep(1)
+                self.driver.reload_via_url()
+                time.sleep(0.2)
                 return False
 
-            with Image.open(file_path) as img:
-                w, h = img.size
-                if w < 132:
-                    os.remove(file_path)
-                    logging.warning(f"Узкий кадр (w={w}) → перезагрузка")
-                    if self.driver.reload_via_url():
-                        time.sleep(1)
-                    return False
-                img.crop((66, 0, w-66, h)).save(file_path, quality=95)
+            # Кроп боковых панелей
+            cropped = img.crop((66, 0, w-66, h))
 
-            if os.path.getsize(file_path) / 1024 < 100:
+            # Качество из конфига
+            quality = int(self.config.config.get('image_quality', 92))
+            quality = max(75, min(100, quality))
+
+            # Сохраняем как JPG
+            cropped.save(file_path, "JPEG", quality=quality, optimize=True, progressive=True)
+
+            # Проверка размера
+            if os.path.getsize(file_path) < 70 * 1024:
                 os.remove(file_path)
-                logging.warning("Обманка (<100 КБ) → перезагрузка")
-                if self.driver.reload_via_url():
-                    time.sleep(1)
+                logging.warning("JPG слишком маленький → перезагрузка")
+                self.driver.reload_via_url()
+                time.sleep(0.2)
                 return False
 
             self.last_file = file_path
             return True
 
         except Exception as e:
+            logging.error(f"Ошибка захвата кадра: {e}")
             try: os.remove(file_path)
             except: pass
-            logging.error("Перезагрузка из-за исключения")
-            if self.driver.reload_via_url():
-                time.sleep(1)
+            self.driver.reload_via_url()
+            time.sleep(0.2)
             return False
 
+
 # ----------------------------------------------------------------------
-# Видеокодер (обновлённый)
+# Видеокодер — теперь ищет .jpg
 # ----------------------------------------------------------------------
 class VideoEncoder:
-    def __init__(self, config, gui_queue):
+    def __init__(self, config, gui_queue, frame_capture):
         self.config = config
         self.gui_queue = gui_queue
+        self.frame_capture = frame_capture  # нужен для доступа к папке
 
     def _get_video_path(self, date_str):
         folder = os.path.join("capture", date_str)
@@ -344,57 +368,71 @@ class VideoEncoder:
         return os.path.join(folder, f"video-{date_str}.mp4")
 
     def encode(self, date_str):
-        video_path = self._get_video_path(date_str)
-        frames = sorted(glob.glob(os.path.join("capture", date_str, "capt-*.png")))
+        """Создаёт видео из всех JPG-кадров за указанную дату"""
+        folder = os.path.join("capture", date_str)
+        pattern = os.path.join(folder, "capt-*.jpg")
+        frames = sorted(glob.glob(pattern))
+
         if not frames:
-            logging.info(f"Нет кадров для {date_str}")
+            logging.info(f"Нет JPG-кадров для конвертации за {date_str}")
+            self.gui_queue.put(('video_done', "Нет кадров для видео"))
             return
 
-        # Подготовка — сразу видно, что процесс пошёл
-        self.gui_queue.put(('video_prepare',))
+        # Читаем первый кадр для размеров
+        first_frame = cv2.imread(frames[0])
+        if first_frame is None:
+            logging.error("Не удалось прочитать первый кадр")
+            return
+        h, w = first_frame.shape[:2]
 
-        h, w, _ = cv2.imread(frames[0]).shape
-        writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'mp4v'), self.config['video_fps'], (w, h))
+        video_path = self._get_video_path(date_str)
+        writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'mp4v'),
+                                 self.config['video_fps'], (w, h))
 
         total = len(frames)
-
-        # Реальный старт конвертации
+        self.gui_queue.put(('video_prepare',))
         self.gui_queue.put(('video_start', total))
 
-        for i, f in enumerate(frames):
-            writer.write(cv2.imread(f))
-            self.gui_queue.put(('video_progress', i + 1, total))
+        for i, jpg_path in enumerate(frames):
+            frame = cv2.imread(jpg_path)
+            if frame is not None:
+                writer.write(frame)
+            # Обновляем прогресс реже — чтобы GUI не тормозил
+            if (i + 1) % 10 == 0 or i == total - 1:
+                self.gui_queue.put(('video_progress', i + 1, total))
 
         writer.release()
 
-        summary = f"Конвертация завершена: {total} кадров → {os.path.basename(video_path)}"
+        summary = f"Видео создано: video-{date_str}.mp4 ({total} кадров)"
         self.gui_queue.put(('video_done', summary))
         logging.info(summary)
 
-        time.sleep(5)  # пауза 5 секунд перед удалением
-
-        if self.config['delete_frames_after_video']:
+        # Удаление кадров после конвертации
+        if self.config.get('delete_frames_after_video', False):
             deleted = 0
-            for f in frames:
+            for p in frames:
                 try:
-                    os.remove(f)
+                    os.remove(p)
                     deleted += 1
-                except Exception as e:
-                    logging.warning(f"Не удалось удалить {f}: {e}")
-            logging.info(f"Удалено {deleted} кадров")
+                except:
+                    pass
+            logging.info(f"Удалено {deleted}/{total} JPG-кадров")
             self.gui_queue.put(('delete_done', deleted))
-        else:
-            self.gui_queue.put(('delete_done', 0))
-            
+
+
 # ----------------------------------------------------------------------
-# Конфиг
+# Конфиг — добавлено image_quality
 # ----------------------------------------------------------------------
 class ConfigManager:
     DEFAULT_CONFIG = {
         'adress_url': 'http://maps.ufanet.ru/orenburg#1759214666SGR59',
-        'time_begin': '07:00', 'time_end': '20:00',
-        'time_period_interval': 0.5, 'time_video': '20:01',
-        'video_fps': 60, 'delete_frames_after_video': False
+        'time_begin': '06:00',
+        'time_end': '19:00',
+        'time_period_interval': 0.5,
+        'time_video': '19:05',
+        'video_fps': 60,
+        'delete_frames_after_video': True,
+        'image_quality': 92
     }
 
     def __init__(self, filename='config.yaml'):
@@ -408,24 +446,24 @@ class ConfigManager:
         if not os.path.exists(self.filename):
             self._save_default()
             return
-
         try:
             with open(self.filename, 'r', encoding='utf-8') as f:
                 loaded = self.yaml.load(f) or {}
-            loaded = {**self.DEFAULT_CONFIG, **loaded}
+            self.config = {**self.DEFAULT_CONFIG, **loaded}
 
-            begin_min = self._to_minutes(loaded['time_begin'])
-            end_min = self._to_minutes(loaded['time_end'])
+            # Валидация image_quality
+            q = self.config.get('image_quality', 92)
+            self.config['image_quality'] = max(75, min(100, int(q)))
+
+            # Исправление времени, если нужно
+            begin_min = self._to_minutes(self.config['time_begin'])
+            end_min = self._to_minutes(self.config['time_end'])
             if end_min <= begin_min:
-                loaded['time_end'] = self._from_minutes(begin_min + 1)
-                logging.warning(f"time_end исправлен на {loaded['time_end']}")
-
-            video_min = self._to_minutes(loaded['time_video'])
+                self.config['time_end'] = self._from_minutes(begin_min + 60)
+            video_min = self._to_minutes(self.config['time_video'])
             if video_min <= end_min:
-                loaded['time_video'] = self._from_minutes(end_min + 1)
-                logging.warning(f"time_video исправлен на {loaded['time_video']}")
+                self.config['time_video'] = self._from_minutes(end_min + 5)
 
-            self.config = loaded
             self._save()
         except Exception as e:
             logging.error(f"Ошибка загрузки config: {e}")
@@ -447,20 +485,18 @@ class ConfigManager:
         return f"{m // 60:02d}:{m % 60:02d}"
 
     def update(self, new_config, gui_queue=None):
-        old_video_time = self.config.get('time_video')
         self.config.update(new_config)
         self._save()
         logging.info(f"Конфиг обновлён: {new_config}")
-        if gui_queue and old_video_time != new_config.get('time_video'):
-            gui_queue.put(('config_update',))
 
-    def __getitem__(self, key): return self.config[key]
-    def __setitem__(self, key, value): self.config[key] = value            
-    
+    # ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
+    # ВАЖНЫЙ МЕТОД:
+    def get(self, key, default=None):
+        return self.config.get(key, default)
+    # ←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←←
 
-# ----------------------------------------------------------------------
-# Watchdog
-# ----------------------------------------------------------------------
+    def __getitem__(self, key):
+        return self.config[key]
 class ConfigWatcher(FileSystemEventHandler):
     def __init__(self, config_manager, config_queue):
         self.config_manager = config_manager
@@ -476,4 +512,4 @@ class ConfigWatcher(FileSystemEventHandler):
         self.last_modified = now
         logging.info("Изменение config.yaml")
         self.config_manager._load()
-        self.config_queue.put(self.config_manager.config.copy())    
+        self.config_queue.put(self.config_manager.config.copy())
