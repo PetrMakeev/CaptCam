@@ -142,7 +142,7 @@ class CaptureAppGUI:
                     self.encoder.encode(today_str)
                     self.last_video_triggered = True
 
-            time.sleep(self.config_manager['time_period_interval'])
+            time.sleep(max(0.1, float(self.config_manager['time_period_interval'])))
 
     def _init_state(self):
         now = datetime.now()
@@ -393,7 +393,7 @@ class ConfigManager:
     DEFAULT_CONFIG = {
         'adress_url': 'http://maps.ufanet.ru/orenburg#1759214666SGR59',
         'time_begin': '07:00', 'time_end': '20:00',
-        'time_period_interval': 15, 'time_video': '20:01',
+        'time_period_interval': 0.5, 'time_video': '20:01',
         'video_fps': 60, 'delete_frames_after_video': False
     }
 

@@ -1,7 +1,7 @@
 adress_url: http://maps.ufanet.ru/orenburg#1759214666SGR59
 time_begin: 06:00
 time_end: 19:00
-time_period_interval: 2
+time_period_interval: 0.5
 time_video: 19:05
 video_fps: 60
 delete_frames_after_video: true

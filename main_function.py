@@ -124,12 +124,12 @@ def validate_config(data):
             errors.append("time_video должен быть позже time_end")
 
     try:
-        interval = int(data['time_period_interval'])
+        interval = float(data['time_period_interval'])   # было int → стало float
         if interval <= 0:
             errors.append("time_period_interval должен быть > 0")
     except:
-        errors.append("time_period_interval — целое число")
-        interval = 0
+        errors.append("time_period_interval — положительное число (можно дробное, например 0.5)")
+        interval = 0.5
 
     try:
         fps = int(data['video_fps'])
@@ -151,7 +151,7 @@ def validate_config(data):
     delete_frames = parse_bool(data['delete_frames_after_video'], 'delete_frames_after_video')
 
     parsed = {
-        'interval': interval,
+        'interval': interval,     # теперь float
         'fps': fps,
         'delete_frames': delete_frames
     }
