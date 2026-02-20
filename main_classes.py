@@ -264,6 +264,7 @@ class FrameCapture:
         self.config = config
         self.driver = driver
         self.last_file = None
+        self.last_two_sizes = []  # Новый атрибут: размеры двух последних успешных кадров
 
     def count_existing_frames(self):
         date_str = datetime.now().strftime("%Y%m%d")
@@ -333,13 +334,27 @@ class FrameCapture:
             # Сохраняем как JPG
             cropped.save(file_path, "JPEG", quality=quality, optimize=True, progressive=True)
 
-            # Проверка размера
+            # НОВАЯ ПРОВЕРКА: сравнение размера с двумя предыдущими
+            size = os.path.getsize(file_path)
+            if len(self.last_two_sizes) == 2 and size == self.last_two_sizes[0] and size == self.last_two_sizes[1]:
+                logging.warning("Размеры последних трех кадров одинаковые → перезагрузка")
+                os.remove(file_path)
+                self.driver.reload_via_url()
+                time.sleep(0.2)
+                return False
+
+            # Проверка размера (существующая)
             if os.path.getsize(file_path) < 70 * 1024:
                 os.remove(file_path)
                 logging.warning("JPG слишком маленький → перезагрузка")
                 self.driver.reload_via_url()
                 time.sleep(0.2)
                 return False
+
+            # Если все проверки пройдены, обновляем список размеров
+            self.last_two_sizes.append(size)
+            if len(self.last_two_sizes) > 2:
+                self.last_two_sizes = self.last_two_sizes[-2:]
 
             self.last_file = file_path
             return True
